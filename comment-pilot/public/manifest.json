@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "CommentPilot",
+  "version": "1.0",
+  "description": "Generate high-quality comments and messages for LinkedIn using AI.",
+  "permissions": ["storage", "sidePanel", "activeTab", "scripting"],
+  "host_permissions": ["*://*.linkedin.com/*", "https://api.groq.com/*", "https://openrouter.ai/api/*"],
+  "background": {
+    "service_worker": "src/background/index.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*.linkedin.com/*"],
+      "js": ["src/content/index.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "action": {
+    "default_title": "Open CommentPilot"
+  }
+}
