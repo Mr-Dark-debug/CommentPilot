@@ -1,5 +1,4 @@
 const DEFAULT_PROVIDER = 'groq';
-const DEFAULT_MODEL = 'llama-3.1-8b-instant';
 
 // Allow users to open the side panel by clicking the extension icon.
 chrome.sidePanel
@@ -7,12 +6,9 @@ chrome.sidePanel
   .catch((error) => console.error('Failed to configure side panel behavior', error));
 
 function ensureDefaultSettings(): void {
-  chrome.storage.local.get(['provider', 'model'], (result) => {
+  chrome.storage.local.get(['provider'], (result) => {
     if (!result.provider) {
       chrome.storage.local.set({ provider: DEFAULT_PROVIDER });
-    }
-    if (!result.model) {
-      chrome.storage.local.set({ model: DEFAULT_MODEL });
     }
   });
 }

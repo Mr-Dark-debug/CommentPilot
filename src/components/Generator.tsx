@@ -3,6 +3,8 @@ import { generateCompletion } from '../lib/ai';
 import {
   clearPendingComposeContext,
   getPendingComposeContext,
+  getSettings,
+  hasSavedConfiguration,
   saveHistoryItem
 } from '../lib/storage';
 import {
@@ -29,6 +31,7 @@ export const Generator: React.FC = () => {
   const [results, setResults] = useState<CommentResults | SingleResultMap | null>(null);
   const [copiedIndex, setCopiedIndex] = useState<string | null>(null);
   const [savedDraftIndex, setSavedDraftIndex] = useState<string | null>(null);
+  const [settingsReady, setSettingsReady] = useState(false);
 
   // Context State
   const [contextText, setContextText] = useState('');
@@ -65,6 +68,11 @@ export const Generator: React.FC = () => {
     };
 
     const hydrateContext = async () => {
+      const currentSettings = await getSettings();
+      if (!cancelled) {
+        setSettingsReady(hasSavedConfiguration(currentSettings));
+      }
+
       const usedPendingContext = await applyPendingContext();
       if (usedPendingContext || cancelled) {
         return;
@@ -93,6 +101,19 @@ export const Generator: React.FC = () => {
     };
 
     const handleStorageChange = (changes: { [key: string]: chrome.storage.StorageChange }, areaName: string) => {
+      if (areaName === 'local' && (
+        changes.provider ||
+        changes.model ||
+        changes.groqApiKey ||
+        changes.openrouterApiKey
+      )) {
+        getSettings().then((currentSettings) => {
+          if (!cancelled) {
+            setSettingsReady(hasSavedConfiguration(currentSettings));
+          }
+        });
+      }
+
       if (areaName === 'local' && changes.pendingComposeContext?.newValue) {
         applyPendingContext();
       }
@@ -376,11 +397,11 @@ export const Generator: React.FC = () => {
 
         <button
           onClick={handleGenerate}
-          disabled={loading}
+          disabled={loading || !settingsReady}
           className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 rounded transition disabled:bg-blue-300"
         >
           {loading ? <RefreshCw className="animate-spin" size={18} /> : <Target size={18} />}
-          {loading ? 'Generating...' : 'Generate'}
+          {loading ? 'Generating...' : settingsReady ? 'Generate' : 'Save provider settings first'}
         </button>
       </div>
 

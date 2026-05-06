@@ -1,4 +1,4 @@
-import { getSettings } from './storage';
+import { getSettings, hasSavedConfiguration } from './storage';
 
 export interface AIResponse {
   choices: {
@@ -11,8 +11,13 @@ export interface AIResponse {
 export const generateCompletion = async (systemPrompt: string, userPrompt: string): Promise<string> => {
   const settings = await getSettings();
 
+  if (!hasSavedConfiguration(settings)) {
+    throw new Error('Saved provider settings are incomplete. Save an API key and model in Settings before generating.');
+  }
+
   if (settings.provider === 'groq') {
     if (!settings.groqApiKey) throw new Error("Groq API key not found. Please add it in Settings.");
+    if (!settings.model) throw new Error('No Groq model selected. Save one in Settings first.');
 
     const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
@@ -39,6 +44,7 @@ export const generateCompletion = async (systemPrompt: string, userPrompt: strin
     return extractChoiceContent(data);
   } else if (settings.provider === 'openrouter') {
     if (!settings.openrouterApiKey) throw new Error("OpenRouter API key not found. Please add it in Settings.");
+    if (!settings.model) throw new Error('No OpenRouter model selected. Save one in Settings first.');
 
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',

@@ -1,10 +1,11 @@
-import { DEFAULT_MODEL_BY_PROVIDER, type ProviderId, isValidModelForProvider } from './models';
+import { type ModelOption, type ProviderId } from './models';
 
 export interface AppSettings {
   provider: ProviderId;
   model: string;
   groqApiKey: string;
   openrouterApiKey: string;
+  providerModels: Partial<Record<ProviderId, ModelOption[]>>;
 }
 
 export interface HistoryItem {
@@ -28,18 +29,18 @@ export interface PendingComposeContext {
 export const getSettings = async (): Promise<AppSettings> => {
   return new Promise((resolve) => {
     chrome.storage.local.get(
-      ['provider', 'model', 'groqApiKey', 'openrouterApiKey'],
+      ['provider', 'model', 'groqApiKey', 'openrouterApiKey', 'providerModels'],
       (result) => {
         const provider: ProviderId = result.provider === 'openrouter' ? 'openrouter' : 'groq';
-        const fallbackModel = DEFAULT_MODEL_BY_PROVIDER[provider];
-        const storedModel = typeof result.model === 'string' ? result.model : undefined;
-        const model = isValidModelForProvider(provider, storedModel) ? storedModel : fallbackModel;
+        const model = typeof result.model === 'string' ? result.model : '';
+        const providerModels = isProviderModelsRecord(result.providerModels) ? result.providerModels : {};
 
         resolve({
           provider,
           model,
           groqApiKey: typeof result.groqApiKey === 'string' ? result.groqApiKey : '',
           openrouterApiKey: typeof result.openrouterApiKey === 'string' ? result.openrouterApiKey : '',
+          providerModels
         });
       }
     );
@@ -53,6 +54,11 @@ export const saveSettings = async (settings: Partial<AppSettings>): Promise<void
     });
   });
 };
+
+export function hasSavedConfiguration(settings: Pick<AppSettings, 'provider' | 'model' | 'groqApiKey' | 'openrouterApiKey'>): boolean {
+  const apiKey = settings.provider === 'groq' ? settings.groqApiKey : settings.openrouterApiKey;
+  return Boolean(apiKey.trim() && settings.model.trim());
+}
 
 export const getHistory = async (): Promise<HistoryItem[]> => {
   return new Promise((resolve) => {
@@ -137,4 +143,24 @@ function isPendingComposeContext(value: unknown): value is PendingComposeContext
     candidate.source === 'linkedin-inline' &&
     typeof candidate.timestamp === 'number'
   );
+}
+
+function isProviderModelsRecord(value: unknown): value is Partial<Record<ProviderId, ModelOption[]>> {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  return Object.values(value as Record<string, unknown>).every((entry) => {
+    if (!Array.isArray(entry)) {
+      return false;
+    }
+
+    return entry.every(
+      (item) =>
+        item &&
+        typeof item === 'object' &&
+        typeof (item as ModelOption).id === 'string' &&
+        typeof (item as ModelOption).name === 'string'
+    );
+  });
 }

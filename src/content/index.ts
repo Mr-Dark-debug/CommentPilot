@@ -22,9 +22,25 @@ interface PendingComposeContext {
 
 const HOST_ATTR = 'data-commentpilot-host';
 const HOST_KIND_ATTR = 'data-commentpilot-kind';
-const POST_SELECTOR = 'div[role="listitem"]';
-const COMMENT_SELECTOR = '[componentkey*="replaceableComment_"]';
-const TEXT_BOX_SELECTOR = '[data-testid="expandable-text-box"]';
+const POST_CONTAINER_SELECTORS = [
+  'div[role="listitem"]',
+  '.fie-impression-container',
+  '.feed-shared-update-v2',
+  '.feed-shared-update-v2__update-content-wrapper'
+];
+const COMMENT_CONTAINER_SELECTORS = [
+  '[componentkey*="replaceableComment_"]',
+  '.comments-comment-item',
+  '.comments-comment-item__main-content',
+  '.comments-comment-social-bar'
+];
+const TEXT_BOX_SELECTORS = [
+  '[data-testid="expandable-text-box"]',
+  '.update-components-text',
+  '.comments-comment-item__main-content',
+  '.comments-comment-item-content-body',
+  '.comments-comment-item__comment-text'
+];
 
 chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   if (request.action === 'GET_PAGE_CONTEXT') {
@@ -80,7 +96,7 @@ function extractProfileContext(url: string): ExtractedContext {
 }
 
 function findBestPostCandidate(): HTMLElement | null {
-  const posts = Array.from(document.querySelectorAll<HTMLElement>(POST_SELECTOR)).filter((post) =>
+  const posts = Array.from(document.querySelectorAll<HTMLElement>(POST_CONTAINER_SELECTORS.join(','))).filter((post) =>
     looksLikeFeedPost(post)
   );
 
@@ -108,11 +124,11 @@ function normalizeText(text: string): string {
 }
 
 function isCommentElement(element: Element): boolean {
-  return Boolean(element.closest(COMMENT_SELECTOR));
+  return Boolean(element.closest(COMMENT_CONTAINER_SELECTORS.join(',')));
 }
 
 function extractPostData(postElement: HTMLElement): { content: string; author: string } {
-  const textBoxes = Array.from(postElement.querySelectorAll<HTMLElement>(TEXT_BOX_SELECTOR))
+  const textBoxes = Array.from(postElement.querySelectorAll<HTMLElement>(TEXT_BOX_SELECTORS.join(',')))
     .filter((box) => !isCommentElement(box))
     .map((box) => normalizeText(box.textContent || ''))
     .filter((text) => text.length > 20);
@@ -124,9 +140,9 @@ function extractPostData(postElement: HTMLElement): { content: string; author: s
 }
 
 function extractCommentData(commentElement: HTMLElement): { content: string; author: string } {
-  const content = normalizeText(
-    commentElement.querySelector<HTMLElement>(TEXT_BOX_SELECTOR)?.textContent || ''
-  );
+  const content = Array.from(commentElement.querySelectorAll<HTMLElement>(TEXT_BOX_SELECTORS.join(',')))
+    .map((element) => normalizeText(element.textContent || ''))
+    .find((text) => text.length > 0) || '';
   const author = extractAuthorName(commentElement);
 
   return { content, author };
@@ -174,6 +190,40 @@ function findSharedActionBar(root: HTMLElement, labels: string[]): HTMLElement |
     if (controls.every((control) => current?.contains(control))) {
       return current;
     }
+    current = current.parentElement;
+  }
+
+  return null;
+}
+
+function findCommentRootFromReplyControl(replyControl: HTMLElement): HTMLElement | null {
+  let current = replyControl.parentElement;
+
+  while (current && current !== document.body) {
+    const textCandidate = extractCommentData(current).content;
+    const hasReply = Boolean(findLabeledControl(current, 'Reply'));
+
+    if (textCandidate && hasReply) {
+      return current;
+    }
+
+    current = current.parentElement;
+  }
+
+  return null;
+}
+
+function findPostRootFromActionBar(actionBar: HTMLElement): HTMLElement | null {
+  let current = actionBar.parentElement;
+
+  while (current && current !== document.body) {
+    const hasPostText = extractPostData(current).content;
+    const hasMainActions = Boolean(findSharedActionBar(current, ['Like', 'Comment', 'Repost']));
+
+    if (hasPostText && hasMainActions) {
+      return current;
+    }
+
     current = current.parentElement;
   }
 
@@ -300,15 +350,22 @@ function mountPostAction(postElement: HTMLElement): void {
   actionBar.insertAdjacentElement('afterend', host);
 }
 
-function mountCommentAction(commentElement: HTMLElement): void {
+function mountCommentAction(commentElement: HTMLElement, replyControl?: HTMLElement): void {
   const actionBar = findSharedActionBar(commentElement, ['Like', 'Reply']);
-  if (!actionBar || actionBar.nextElementSibling?.hasAttribute(HOST_ATTR)) {
+  const anchor = replyControl || actionBar;
+
+  if (!anchor) {
+    return;
+  }
+
+  const siblingHost = replyControl ? replyControl.nextElementSibling : actionBar?.nextElementSibling;
+  if (siblingHost?.hasAttribute(HOST_ATTR)) {
     return;
   }
 
   const host = createInlineAction('comment', async () => {
     const commentData = extractCommentData(commentElement);
-    const postElement = commentElement.closest<HTMLElement>(POST_SELECTOR) || findBestPostCandidate();
+    const postElement = commentElement.closest<HTMLElement>(POST_CONTAINER_SELECTORS.join(',')) || findBestPostCandidate();
     const postData = postElement ? extractPostData(postElement) : { content: '', author: '' };
 
     if (!commentData.content) {
@@ -326,16 +383,45 @@ function mountCommentAction(commentElement: HTMLElement): void {
     });
   });
 
+  if (replyControl) {
+    host.style.display = 'inline-flex';
+    host.style.marginTop = '0';
+    host.style.marginLeft = '8px';
+    replyControl.insertAdjacentElement('afterend', host);
+    return;
+  }
+
   actionBar.insertAdjacentElement('afterend', host);
 }
 
 function scanAndMountInlineActions(): void {
-  Array.from(document.querySelectorAll<HTMLElement>(POST_SELECTOR))
-    .filter((post) => looksLikeFeedPost(post))
-    .forEach((post) => mountPostAction(post));
+  const postActionBars = Array.from(document.querySelectorAll<HTMLElement>('.feed-shared-social-action-bar'));
+  postActionBars.forEach((actionBar) => {
+    const postElement = findPostRootFromActionBar(actionBar);
+    if (postElement) {
+      mountPostAction(postElement);
+    }
+  });
 
-  Array.from(document.querySelectorAll<HTMLElement>(COMMENT_SELECTOR))
-    .forEach((comment) => mountCommentAction(comment));
+  const explicitComments = Array.from(document.querySelectorAll<HTMLElement>(COMMENT_CONTAINER_SELECTORS.join(',')));
+  explicitComments.forEach((comment) => mountCommentAction(comment));
+
+  const replyControls = Array.from(document.querySelectorAll<HTMLElement>('button, a, [role="button"]')).filter((control) => {
+    if (control.closest(`[${HOST_ATTR}]`)) {
+      return false;
+    }
+
+    const ariaLabel = control.getAttribute('aria-label') || '';
+    const text = normalizeText(control.textContent || '');
+    return ariaLabel.includes('Reply') || text === 'Reply' || text.startsWith('Reply');
+  });
+
+  replyControls.forEach((replyControl) => {
+    const commentRoot = findCommentRootFromReplyControl(replyControl);
+    if (commentRoot) {
+      mountCommentAction(commentRoot, replyControl);
+    }
+  });
 }
 
 let scanQueued = false;
