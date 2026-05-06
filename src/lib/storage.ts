@@ -13,6 +13,16 @@ export interface HistoryItem {
   timestamp: number;
 }
 
+export interface PendingComposeContext {
+  mode: 'comment' | 'reply' | 'message';
+  contextText: string;
+  commentText?: string;
+  author?: string;
+  url: string;
+  source: 'linkedin-inline';
+  timestamp: number;
+}
+
 export const getSettings = async (): Promise<AppSettings> => {
   return new Promise((resolve) => {
     chrome.storage.local.get(
@@ -77,6 +87,30 @@ export const clearHistory = async (): Promise<void> => {
 export const clearAllData = async (): Promise<void> => {
   return new Promise((resolve) => {
     chrome.storage.local.clear(() => {
+      resolve();
+    });
+  });
+};
+
+export const getPendingComposeContext = async (): Promise<PendingComposeContext | null> => {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(['pendingComposeContext'], (result) => {
+      resolve(result.pendingComposeContext || null);
+    });
+  });
+};
+
+export const savePendingComposeContext = async (context: PendingComposeContext): Promise<void> => {
+  return new Promise((resolve) => {
+    chrome.storage.local.set({ pendingComposeContext: context }, () => {
+      resolve();
+    });
+  });
+};
+
+export const clearPendingComposeContext = async (): Promise<void> => {
+  return new Promise((resolve) => {
+    chrome.storage.local.remove('pendingComposeContext', () => {
       resolve();
     });
   });

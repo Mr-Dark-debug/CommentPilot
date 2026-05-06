@@ -1,6 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { generateCompletion } from '../lib/ai';
-import { saveHistoryItem } from '../lib/storage';
+import {
+  clearPendingComposeContext,
+  getPendingComposeContext,
+  saveHistoryItem
+} from '../lib/storage';
 import {
   COMMENT_SYSTEM_PROMPT, buildCommentUserPrompt,
   REPLY_SYSTEM_PROMPT, buildReplyUserPrompt,
@@ -28,20 +32,65 @@ export const Generator: React.FC = () => {
   const [userInstructions, setUserInstructions] = useState('');
 
   useEffect(() => {
-    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-      if (tabs[0]?.id) {
+    let cancelled = false;
+
+    const applyPendingContext = async () => {
+      const pending = await getPendingComposeContext();
+      const isFreshPending = pending && Date.now() - pending.timestamp < 30 * 60 * 1000;
+
+      if (isFreshPending && !cancelled) {
+        setMode(pending.mode);
+        setContextUrl(pending.url || '');
+        setContextText(pending.contextText || '');
+        setUserInstructions(pending.mode === 'reply' ? pending.commentText || '' : '');
+        await clearPendingComposeContext();
+        return true;
+      }
+
+      if (pending) {
+        await clearPendingComposeContext();
+      }
+
+      return false;
+    };
+
+    const hydrateContext = async () => {
+      const usedPendingContext = await applyPendingContext();
+      if (usedPendingContext || cancelled) {
+        return;
+      }
+
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        if (cancelled || !tabs[0]?.id) {
+          return;
+        }
+
         setContextUrl(tabs[0].url || '');
         chrome.tabs.sendMessage(
           tabs[0].id,
           { action: 'GET_PAGE_CONTEXT' },
           (response) => {
-            if (response?.success && response.data) {
+            if (!cancelled && response?.success && response.data) {
               setContextText(response.data.content || '');
             }
           }
         );
+      });
+    };
+
+    const handleStorageChange = (changes: { [key: string]: chrome.storage.StorageChange }, areaName: string) => {
+      if (areaName === 'local' && changes.pendingComposeContext?.newValue) {
+        applyPendingContext();
       }
-    });
+    };
+
+    chrome.storage.onChanged.addListener(handleStorageChange);
+    hydrateContext();
+
+    return () => {
+      cancelled = true;
+      chrome.storage.onChanged.removeListener(handleStorageChange);
+    };
   }, []);
 
   const handleGenerate = async () => {
