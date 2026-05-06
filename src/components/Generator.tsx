@@ -32,6 +32,8 @@ export const Generator: React.FC = () => {
   const [copiedIndex, setCopiedIndex] = useState<string | null>(null);
   const [savedDraftIndex, setSavedDraftIndex] = useState<string | null>(null);
   const [settingsReady, setSettingsReady] = useState(false);
+  const [canApplyToLinkedIn, setCanApplyToLinkedIn] = useState(false);
+  const [appliedIndex, setAppliedIndex] = useState<string | null>(null);
 
   // Context State
   const [contextText, setContextText] = useState('');
@@ -56,6 +58,7 @@ export const Generator: React.FC = () => {
         setContextUrl(pending.url || '');
         setContextText(pending.contextText || '');
         setUserInstructions(pending.mode === 'reply' ? pending.commentText || '' : '');
+        setCanApplyToLinkedIn(true);
         await clearPendingComposeContext();
         return true;
       }
@@ -71,6 +74,7 @@ export const Generator: React.FC = () => {
       const currentSettings = await getSettings();
       if (!cancelled) {
         setSettingsReady(hasSavedConfiguration(currentSettings));
+        setCanApplyToLinkedIn(false);
       }
 
       const usedPendingContext = await applyPendingContext();
@@ -154,7 +158,15 @@ export const Generator: React.FC = () => {
       }
 
       const responseText = await generateCompletion(systemPrompt, userPrompt);
-      setResults(parseGeneratedResults(mode, responseText));
+      const parsedResults = parseGeneratedResults(mode, responseText);
+      setResults(parsedResults);
+
+      if (canApplyToLinkedIn && mode === 'reply') {
+        const autoReply = getFirstApplicableResult(parsedResults, mode);
+        if (autoReply) {
+          await applyResultToLinkedIn(autoReply, 'auto-reply');
+        }
+      }
 
     } catch (err: any) {
       setError(err.message || "An error occurred during generation.");
@@ -174,6 +186,26 @@ export const Generator: React.FC = () => {
     setSavedDraftIndex(key);
     await saveHistoryItem({ type: mode, content: "[DRAFT] " + text, url: contextUrl });
     setTimeout(() => setSavedDraftIndex(null), 2000);
+  };
+
+  const applyResultToLinkedIn = async (text: string, key: string) => {
+    const tab = await getActiveTab();
+    if (!tab?.id) {
+      throw new Error('No active LinkedIn tab was found.');
+    }
+
+    const response = await chrome.tabs.sendMessage(tab.id, {
+      action: 'APPLY_GENERATED_TEXT',
+      mode,
+      text
+    });
+
+    if (!response?.success) {
+      throw new Error(response?.error || 'Failed to insert generated text into LinkedIn.');
+    }
+
+    setAppliedIndex(key);
+    setTimeout(() => setAppliedIndex((current) => (current === key ? null : current)), 2000);
   };
 
   const renderCommentResults = () => {
@@ -197,6 +229,15 @@ export const Generator: React.FC = () => {
                     >
                       {savedDraftIndex === `${category}-${i}` ? <Check size={16} className="text-green-600"/> : <BookmarkPlus size={16} />}
                     </button>
+                    {canApplyToLinkedIn && (
+                      <button
+                        onClick={() => applyResultToLinkedIn(comment, `${category}-${i}`)}
+                        title="Insert into LinkedIn"
+                        className="p-1.5 text-gray-400 hover:text-blue-600 bg-gray-50 hover:bg-blue-50 rounded transition"
+                      >
+                        {appliedIndex === `${category}-${i}` ? <Check size={16} className="text-green-600"/> : <PenTool size={16} />}
+                      </button>
+                    )}
                     <button
                       onClick={() => copyResult(comment, `${category}-${i}`)}
                       title="Copy & Save to History"
@@ -232,6 +273,15 @@ export const Generator: React.FC = () => {
                 >
                   {savedDraftIndex === key ? <Check size={16} className="text-green-600"/> : <BookmarkPlus size={16} />}
                 </button>
+                {canApplyToLinkedIn && mode !== 'message' && (
+                  <button
+                    onClick={() => applyResultToLinkedIn(value, key)}
+                    title="Insert into LinkedIn"
+                    className="p-1.5 text-gray-400 hover:text-blue-600 bg-gray-50 hover:bg-blue-50 rounded transition"
+                  >
+                    {appliedIndex === key ? <Check size={16} className="text-green-600"/> : <PenTool size={16} />}
+                  </button>
+                )}
                 <button
                   onClick={() => copyResult(value, key)}
                   title="Copy & Save to History"
@@ -444,4 +494,20 @@ function parseGeneratedResults(mode: GeneratorMode, responseText: string): Comme
   return {
     generated: cleaned
   };
+}
+
+function getFirstApplicableResult(results: CommentResults | SingleResultMap, mode: GeneratorMode): string | null {
+  if (mode === 'comment') {
+    const commentResults = results as CommentResults;
+    return commentResults.medium?.[0] || commentResults.short?.[0] || commentResults.strong?.[0] || null;
+  }
+
+  const singleResults = results as SingleResultMap;
+  return Object.values(singleResults).find((value) => typeof value === 'string' && value.trim()) || null;
+}
+
+function getActiveTab(): Promise<chrome.tabs.Tab | undefined> {
+  return new Promise((resolve) => {
+    chrome.tabs.query({ active: true, lastFocusedWindow: true }, (tabs) => resolve(tabs[0]));
+  });
 }

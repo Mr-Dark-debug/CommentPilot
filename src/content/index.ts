@@ -1,7 +1,16 @@
+import { generateCompletion } from '../lib/ai';
+import {
+  COMMENT_SYSTEM_PROMPT,
+  REPLY_SYSTEM_PROMPT,
+  buildCommentUserPrompt,
+  buildReplyUserPrompt
+} from '../lib/prompts';
+
 console.log('CommentPilot content script loaded');
 
 type PageContextType = 'post' | 'profile' | 'unknown';
 type ComposeMode = 'comment' | 'reply' | 'message';
+type InlineActionKind = 'post' | 'comment';
 
 interface ExtractedContext {
   type: PageContextType;
@@ -10,18 +19,10 @@ interface ExtractedContext {
   url: string;
 }
 
-interface PendingComposeContext {
-  mode: ComposeMode;
-  contextText: string;
-  commentText?: string;
-  author?: string;
-  url: string;
-  source: 'linkedin-inline';
-  timestamp: number;
-}
-
 const HOST_ATTR = 'data-commentpilot-host';
 const HOST_KIND_ATTR = 'data-commentpilot-kind';
+const ACTIVE_TARGET_ATTR = 'data-commentpilot-active-target';
+const ACTIVE_MODE_ATTR = 'data-commentpilot-active-mode';
 const POST_CONTAINER_SELECTORS = [
   'div[role="listitem"]',
   '.fie-impression-container',
@@ -41,6 +42,12 @@ const TEXT_BOX_SELECTORS = [
   '.comments-comment-item-content-body',
   '.comments-comment-item__comment-text'
 ];
+const EDITABLE_SELECTORS = [
+  'textarea',
+  '[contenteditable="true"][role="textbox"]',
+  '[contenteditable="true"]',
+  'div[role="textbox"]'
+];
 
 chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   if (request.action === 'GET_PAGE_CONTEXT') {
@@ -49,9 +56,19 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     } catch (error: any) {
       sendResponse({ success: false, error: error.message });
     }
+
+    return true;
   }
 
-  return true;
+  if (request.action === 'APPLY_GENERATED_TEXT') {
+    applyGeneratedTextToActiveComposer(request.mode, request.text)
+      .then(() => sendResponse({ success: true }))
+      .catch((error: any) => sendResponse({ success: false, error: error.message }));
+
+    return true;
+  }
+
+  return false;
 });
 
 function extractPageContext(): ExtractedContext {
@@ -117,6 +134,12 @@ function looksLikeFeedPost(element: HTMLElement): boolean {
 function isNearViewport(element: HTMLElement): boolean {
   const rect = element.getBoundingClientRect();
   return rect.bottom > 0 && rect.top < window.innerHeight * 0.9;
+}
+
+function isVisible(element: HTMLElement): boolean {
+  const rect = element.getBoundingClientRect();
+  const style = window.getComputedStyle(element);
+  return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
 }
 
 function normalizeText(text: string): string {
@@ -230,22 +253,242 @@ function findPostRootFromActionBar(actionBar: HTMLElement): HTMLElement | null {
   return null;
 }
 
-async function openComposer(context: PendingComposeContext): Promise<void> {
-  await new Promise<void>((resolve) => {
-    chrome.storage.local.set({ pendingComposeContext: context }, () => resolve());
-  });
+function findEditableCandidates(root: ParentNode): HTMLElement[] {
+  return Array.from(root.querySelectorAll<HTMLElement>(EDITABLE_SELECTORS.join(','))).filter((element) => {
+    if (!isVisible(element)) {
+      return false;
+    }
 
-  await new Promise<void>((resolve) => {
-    chrome.runtime.sendMessage({ action: 'OPEN_SIDE_PANEL' }, () => {
-      if (chrome.runtime.lastError) {
-        console.error('CommentPilot failed to open side panel', chrome.runtime.lastError.message);
-      }
-      resolve();
-    });
+    if (element.closest(`[${HOST_ATTR}]`)) {
+      return false;
+    }
+
+    return true;
   });
 }
 
-function createInlineAction(kind: 'post' | 'comment', onClick: () => Promise<void>): HTMLElement {
+function findComposerInRoot(root: HTMLElement, mode: ComposeMode): HTMLElement | null {
+  const candidates = findEditableCandidates(root);
+  if (!candidates.length) {
+    return null;
+  }
+
+  const scored = candidates
+    .map((candidate) => {
+      const placeholder = normalizeText(
+        candidate.getAttribute('aria-label') ||
+        candidate.getAttribute('placeholder') ||
+        candidate.textContent ||
+        ''
+      ).toLowerCase();
+      const insideComment = Boolean(candidate.closest(COMMENT_CONTAINER_SELECTORS.join(',')));
+
+      let score = 0;
+      if (mode === 'reply') {
+        if (insideComment) score += 3;
+        if (placeholder.includes('reply')) score += 2;
+      } else {
+        if (!insideComment) score += 3;
+        if (placeholder.includes('comment')) score += 2;
+      }
+      if (placeholder.includes('add a comment')) score += 2;
+      if (candidate === document.activeElement) score += 1;
+
+      return { candidate, score };
+    })
+    .sort((a, b) => b.score - a.score);
+
+  return scored[0]?.candidate || null;
+}
+
+function clearActiveTargets(): void {
+  document.querySelectorAll<HTMLElement>(`[${ACTIVE_TARGET_ATTR}]`).forEach((element) => {
+    element.removeAttribute(ACTIVE_TARGET_ATTR);
+    element.removeAttribute(ACTIVE_MODE_ATTR);
+  });
+}
+
+function setActiveTarget(root: HTMLElement, mode: ComposeMode): void {
+  clearActiveTargets();
+  root.setAttribute(ACTIVE_TARGET_ATTR, 'true');
+  root.setAttribute(ACTIVE_MODE_ATTR, mode);
+}
+
+function getActiveTarget(mode: ComposeMode): HTMLElement | null {
+  const exactMatch = document.querySelector<HTMLElement>(`[${ACTIVE_TARGET_ATTR}="true"][${ACTIVE_MODE_ATTR}="${mode}"]`);
+  if (exactMatch) {
+    return exactMatch;
+  }
+
+  return document.querySelector<HTMLElement>(`[${ACTIVE_TARGET_ATTR}="true"]`);
+}
+
+async function waitForComposer(root: HTMLElement, mode: ComposeMode, timeoutMs = 4000): Promise<HTMLElement> {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const composer = findComposerInRoot(root, mode);
+    if (composer) {
+      return composer;
+    }
+
+    await delay(120);
+  }
+
+  throw new Error(`LinkedIn did not open the ${mode} composer.`);
+}
+
+async function ensureComposer(root: HTMLElement, mode: ComposeMode, triggerControl?: HTMLElement): Promise<HTMLElement> {
+  const existing = findComposerInRoot(root, mode);
+  if (existing) {
+    setActiveTarget(root, mode);
+    return existing;
+  }
+
+  triggerControl?.click();
+  setActiveTarget(root, mode);
+  return waitForComposer(root, mode);
+}
+
+async function applyGeneratedTextToActiveComposer(mode: ComposeMode, text: string): Promise<void> {
+  const targetRoot = getActiveTarget(mode);
+  if (!targetRoot) {
+    throw new Error('No active LinkedIn composer target was found.');
+  }
+
+  const composer = await ensureComposer(targetRoot, mode);
+  insertTextIntoComposer(composer, text);
+}
+
+function insertTextIntoComposer(composer: HTMLElement, text: string): void {
+  composer.focus();
+
+  if (composer instanceof HTMLTextAreaElement || composer instanceof HTMLInputElement) {
+    const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(composer), 'value')?.set;
+    setter?.call(composer, text);
+    composer.dispatchEvent(new Event('input', { bubbles: true }));
+    composer.dispatchEvent(new Event('change', { bubbles: true }));
+    return;
+  }
+
+  const selection = window.getSelection();
+  if (selection) {
+    const range = document.createRange();
+    range.selectNodeContents(composer);
+    range.collapse(false);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
+  let inserted = false;
+  try {
+    inserted = document.execCommand('selectAll', false) && document.execCommand('insertText', false, text);
+  } catch {
+    inserted = false;
+  }
+
+  if (!inserted || normalizeText(composer.textContent || '') !== normalizeText(text)) {
+    composer.innerHTML = '';
+    const paragraph = document.createElement('p');
+    paragraph.textContent = text;
+    composer.appendChild(paragraph);
+  }
+
+  composer.dispatchEvent(new InputEvent('input', { bubbles: true, data: text, inputType: 'insertText' }));
+  composer.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+function pickBestGeneratedText(mode: ComposeMode, rawText: string): string {
+  const cleaned = rawText
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/, '')
+    .trim();
+
+  const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+  if (jsonMatch) {
+    try {
+      const parsed = JSON.parse(jsonMatch[0]) as Record<string, unknown>;
+      if (mode === 'reply') {
+        const reply = parsed.conversational || parsed.concise || parsed.insightful;
+        if (typeof reply === 'string' && reply.trim()) {
+          return reply.trim();
+        }
+      }
+
+      if (mode === 'comment') {
+        const groups = ['medium', 'short', 'strong'] as const;
+        for (const group of groups) {
+          const items = parsed[group];
+          if (Array.isArray(items)) {
+            const firstText = items.find((item) => typeof item === 'string' && item.trim());
+            if (typeof firstText === 'string') {
+              return firstText.trim();
+            }
+          }
+        }
+      }
+    } catch {
+      // Fall back to plain text below.
+    }
+  }
+
+  return cleaned;
+}
+
+async function generateInlineText(mode: ComposeMode, contextText: string, commentText: string): Promise<string> {
+  if (mode === 'reply') {
+    const prompt = buildReplyUserPrompt(contextText, commentText, 'Professional');
+    const rawText = await generateCompletion(REPLY_SYSTEM_PROMPT, `${prompt}\nRequested Length: Short`);
+    return pickBestGeneratedText(mode, rawText);
+  }
+
+  const prompt = buildCommentUserPrompt(contextText, 'Professional', 'High', 'Add value');
+  const rawText = await generateCompletion(COMMENT_SYSTEM_PROMPT, `${prompt}\nRequested Length: Medium`);
+  return pickBestGeneratedText(mode, rawText);
+}
+
+async function handleInlineGenerate(
+  button: HTMLButtonElement,
+  kind: InlineActionKind,
+  targetRoot: HTMLElement,
+  contextText: string,
+  commentText: string,
+  triggerControl?: HTMLElement
+): Promise<void> {
+  const mode: ComposeMode = kind === 'comment' ? 'reply' : 'comment';
+  const baseLabel = kind === 'comment' ? 'AI Reply' : 'AI Comment';
+
+  button.disabled = true;
+  button.textContent = 'Opening...';
+
+  try {
+    await ensureComposer(targetRoot, mode, triggerControl);
+
+    button.textContent = 'Generating...';
+    const generatedText = await generateInlineText(mode, contextText, commentText);
+
+    button.textContent = 'Applying...';
+    await applyGeneratedTextToActiveComposer(mode, generatedText);
+
+    button.textContent = 'Inserted';
+    window.setTimeout(() => {
+      button.textContent = baseLabel;
+      button.disabled = false;
+    }, 1200);
+  } catch (error: any) {
+    console.error('CommentPilot inline action failed', error);
+    button.textContent = error?.message ? 'Try again' : baseLabel;
+    window.setTimeout(() => {
+      button.textContent = baseLabel;
+      button.disabled = false;
+    }, 1600);
+  }
+}
+
+function createInlineAction(
+  kind: InlineActionKind,
+  onClick: (button: HTMLButtonElement) => Promise<void>
+): HTMLElement {
   const host = document.createElement('div');
   host.setAttribute(HOST_ATTR, 'true');
   host.setAttribute(HOST_KIND_ATTR, kind);
@@ -305,21 +548,7 @@ function createInlineAction(kind: 'post' | 'comment', onClick: () => Promise<voi
   shadow.append(style, wrapper);
 
   button.addEventListener('click', async () => {
-    button.disabled = true;
-    button.textContent = 'Opening...';
-
-    try {
-      await onClick();
-      button.textContent = 'Ready';
-      window.setTimeout(() => {
-        button.textContent = baseLabel;
-        button.disabled = false;
-      }, 900);
-    } catch (error) {
-      console.error('CommentPilot inline action failed', error);
-      button.textContent = baseLabel;
-      button.disabled = false;
-    }
+    await onClick(button);
   });
 
   return host;
@@ -331,20 +560,20 @@ function mountPostAction(postElement: HTMLElement): void {
     return;
   }
 
-  const host = createInlineAction('post', async () => {
+  const host = createInlineAction('post', async (button) => {
     const postData = extractPostData(postElement);
     if (!postData.content) {
       throw new Error('No post text found for inline comment generation.');
     }
 
-    await openComposer({
-      mode: 'comment',
-      contextText: postData.content,
-      author: postData.author,
-      url: window.location.href,
-      source: 'linkedin-inline',
-      timestamp: Date.now()
-    });
+    await handleInlineGenerate(
+      button,
+      'post',
+      postElement,
+      postData.content,
+      '',
+      findLabeledControl(postElement, 'Comment') || actionBar
+    );
   });
 
   actionBar.insertAdjacentElement('afterend', host);
@@ -363,7 +592,7 @@ function mountCommentAction(commentElement: HTMLElement, replyControl?: HTMLElem
     return;
   }
 
-  const host = createInlineAction('comment', async () => {
+  const host = createInlineAction('comment', async (button) => {
     const commentData = extractCommentData(commentElement);
     const postElement = commentElement.closest<HTMLElement>(POST_CONTAINER_SELECTORS.join(',')) || findBestPostCandidate();
     const postData = postElement ? extractPostData(postElement) : { content: '', author: '' };
@@ -372,15 +601,14 @@ function mountCommentAction(commentElement: HTMLElement, replyControl?: HTMLElem
       throw new Error('No comment text found for inline reply generation.');
     }
 
-    await openComposer({
-      mode: 'reply',
-      contextText: postData.content,
-      commentText: commentData.content,
-      author: commentData.author || postData.author,
-      url: window.location.href,
-      source: 'linkedin-inline',
-      timestamp: Date.now()
-    });
+    await handleInlineGenerate(
+      button,
+      'comment',
+      commentElement,
+      postData.content,
+      commentData.content,
+      replyControl || findLabeledControl(commentElement, 'Reply') || actionBar
+    );
   });
 
   if (replyControl) {
@@ -392,6 +620,30 @@ function mountCommentAction(commentElement: HTMLElement, replyControl?: HTMLElem
   }
 
   actionBar.insertAdjacentElement('afterend', host);
+}
+
+function mountCommentComposerAction(postElement: HTMLElement, composer: HTMLElement): void {
+  const container =
+    composer.closest<HTMLElement>('form') ||
+    composer.closest<HTMLElement>('.comments-comment-box') ||
+    composer.parentElement;
+
+  if (!container || container.querySelector(`:scope > [${HOST_ATTR}="${'true'}"][${HOST_KIND_ATTR}="post"]`)) {
+    return;
+  }
+
+  const host = createInlineAction('post', async (button) => {
+    const postData = extractPostData(postElement);
+    if (!postData.content) {
+      throw new Error('No post text found for inline comment generation.');
+    }
+
+    setActiveTarget(postElement, 'comment');
+    await handleInlineGenerate(button, 'post', postElement, postData.content, '', findLabeledControl(postElement, 'Comment') || composer);
+  });
+
+  host.style.marginTop = '8px';
+  container.appendChild(host);
 }
 
 function scanAndMountInlineActions(): void {
@@ -422,6 +674,18 @@ function scanAndMountInlineActions(): void {
       mountCommentAction(commentRoot, replyControl);
     }
   });
+
+  const visiblePost = findBestPostCandidate();
+  if (visiblePost) {
+    const commentComposer = findComposerInRoot(visiblePost, 'comment');
+    if (commentComposer && !commentComposer.closest(COMMENT_CONTAINER_SELECTORS.join(','))) {
+      mountCommentComposerAction(visiblePost, commentComposer);
+    }
+  }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 let scanQueued = false;

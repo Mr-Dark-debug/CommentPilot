@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, LoaderCircle, RefreshCw, Save } from 'lucide-react';
 import { clearAllData, clearHistory, getSettings, hasSavedConfiguration, saveSettings, type AppSettings } from '../lib/storage';
 import {
@@ -26,6 +26,9 @@ export const Settings: React.FC = () => {
   const [info, setInfo] = useState<string | null>(null);
   const [saveState, setSaveState] = useState<SaveState>('idle');
   const [modelLoadState, setModelLoadState] = useState<ModelLoadState>('idle');
+  const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  const [modelSearch, setModelSearch] = useState('');
+  const modelPickerRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     getSettings().then((settings) => {
@@ -37,6 +40,17 @@ export const Settings: React.FC = () => {
       setSavedSettings(hydrated);
       setDraftSettings(hydrated);
     });
+  }, []);
+
+  useEffect(() => {
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!modelPickerRef.current?.contains(event.target as Node)) {
+        setModelPickerOpen(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handlePointerDown);
+    return () => document.removeEventListener('mousedown', handlePointerDown);
   }, []);
 
   const activeProvider = draftSettings?.provider || 'groq';
@@ -56,6 +70,17 @@ export const Settings: React.FC = () => {
 
     return [];
   }, [activeProvider, draftSettings]);
+
+  const filteredModels = useMemo(() => {
+    const query = modelSearch.trim().toLowerCase();
+    if (!query) {
+      return availableModels;
+    }
+
+    return availableModels.filter((model) =>
+      model.name.toLowerCase().includes(query) || model.id.toLowerCase().includes(query)
+    );
+  }, [availableModels, modelSearch]);
 
   const hasUnsavedChanges = useMemo(() => {
     if (!savedSettings || !draftSettings) {
@@ -91,6 +116,11 @@ export const Settings: React.FC = () => {
     setSaveState('idle');
     setError(null);
     setInfo(null);
+
+    if (key === 'model') {
+      setModelPickerOpen(false);
+      setModelSearch('');
+    }
   };
 
   const handleProviderChange = (provider: ProviderId) => {
@@ -114,6 +144,8 @@ export const Settings: React.FC = () => {
     setSaveState('idle');
     setError(null);
     setInfo(null);
+    setModelPickerOpen(false);
+    setModelSearch('');
   };
 
   const handleFetchModels = async () => {
@@ -151,6 +183,8 @@ export const Settings: React.FC = () => {
 
       setInfo(`Fetched ${models.length} ${activeProvider === 'groq' ? 'Groq' : 'OpenRouter'} models. Select one, then save.`);
       setSaveState('idle');
+      setModelPickerOpen(true);
+      setModelSearch('');
     } catch (err: any) {
       setError(err.message || 'Failed to fetch models.');
     } finally {
@@ -184,6 +218,7 @@ export const Settings: React.FC = () => {
 
   const providerLabel = activeProvider === 'groq' ? 'Groq' : 'OpenRouter';
   const savedStatus = savedSettings && hasSavedConfiguration(savedSettings);
+  const selectedModel = availableModels.find((model) => model.id === draftSettings.model);
 
   return (
     <div className="p-4 space-y-4 bg-white rounded-lg shadow-sm border border-gray-200">
@@ -234,22 +269,58 @@ export const Settings: React.FC = () => {
           </button>
         </div>
 
-        <select
-          value={draftSettings.model}
-          onChange={(e) => setDraftField('model', e.target.value)}
-          disabled={!availableModels.length}
-          className="w-full border border-gray-300 rounded p-2 text-sm focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-100"
-        >
-          {!availableModels.length ? (
-            <option value="">Fetch models first</option>
-          ) : (
-            availableModels.map((model: ModelOption) => (
-              <option key={model.id} value={model.id}>
-                {model.name} ({model.id})
-              </option>
-            ))
+        <div ref={modelPickerRef} className="relative">
+          <button
+            type="button"
+            onClick={() => availableModels.length && setModelPickerOpen((current) => !current)}
+            disabled={!availableModels.length}
+            className="flex w-full items-center justify-between gap-3 rounded border border-gray-300 bg-white p-2 text-left text-sm focus:border-blue-500 focus:ring-blue-500 disabled:cursor-not-allowed disabled:bg-gray-100"
+          >
+            <span className="min-w-0">
+              {selectedModel ? (
+                <span className="block truncate text-gray-900">
+                  {selectedModel.name} <span className="text-gray-500">({selectedModel.id})</span>
+                </span>
+              ) : (
+                <span className="text-gray-500">Fetch models first</span>
+              )}
+            </span>
+            <span className="shrink-0 text-xs text-gray-500">{availableModels.length ? `${availableModels.length} models` : ''}</span>
+          </button>
+
+          {modelPickerOpen && availableModels.length > 0 && (
+            <div className="absolute z-20 mt-2 w-full rounded-lg border border-gray-200 bg-white shadow-xl">
+              <div className="border-b border-gray-100 p-2">
+                <input
+                  type="text"
+                  value={modelSearch}
+                  onChange={(e) => setModelSearch(e.target.value)}
+                  placeholder="Search models..."
+                  className="w-full rounded border border-gray-300 p-2 text-sm focus:border-blue-500 focus:ring-blue-500"
+                />
+              </div>
+              <div className="max-h-72 overflow-y-auto py-1">
+                {filteredModels.length > 0 ? (
+                  filteredModels.map((model: ModelOption) => (
+                    <button
+                      key={model.id}
+                      type="button"
+                      onClick={() => setDraftField('model', model.id)}
+                      className={`block w-full px-3 py-2 text-left text-sm hover:bg-blue-50 ${
+                        draftSettings.model === model.id ? 'bg-blue-50 text-blue-700' : 'text-gray-800'
+                      }`}
+                    >
+                      <div className="truncate font-medium">{model.name}</div>
+                      <div className="truncate text-xs text-gray-500">{model.id}</div>
+                    </button>
+                  ))
+                ) : (
+                  <div className="px-3 py-3 text-sm text-gray-500">No models match your search.</div>
+                )}
+              </div>
+            </div>
           )}
-        </select>
+        </div>
       </div>
 
       {(error || info || hasUnsavedChanges) && (
