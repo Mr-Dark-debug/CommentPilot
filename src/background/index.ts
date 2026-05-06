@@ -1,21 +1,28 @@
-// Background Script
+const DEFAULT_PROVIDER = 'groq';
+const DEFAULT_MODEL = 'llama-3.1-8b-instant';
 
-// Allow users to open the side panel by clicking the extension icon
+// Allow users to open the side panel by clicking the extension icon.
 chrome.sidePanel
   .setPanelBehavior({ openPanelOnActionClick: true })
-  .catch((error) => console.error(error));
+  .catch((error) => console.error('Failed to configure side panel behavior', error));
 
-// Initialize default settings on install if not present
-chrome.runtime.onInstalled.addListener(() => {
+function ensureDefaultSettings(): void {
   chrome.storage.local.get(['provider', 'model'], (result) => {
     if (!result.provider) {
-      chrome.storage.local.set({ provider: 'groq' });
+      chrome.storage.local.set({ provider: DEFAULT_PROVIDER });
     }
     if (!result.model) {
-      chrome.storage.local.set({ model: 'llama3-8b-8192' });
+      chrome.storage.local.set({ model: DEFAULT_MODEL });
     }
   });
+}
+
+// Initialize defaults on install and on worker startup so reset states recover cleanly.
+chrome.runtime.onInstalled.addListener(() => {
+  ensureDefaultSettings();
 });
+
+ensureDefaultSettings();
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action !== 'OPEN_SIDE_PANEL') {

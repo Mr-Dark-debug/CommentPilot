@@ -12,11 +12,21 @@ import {
 } from '../lib/prompts';
 import { RefreshCw, Copy, Check, Target, PenTool, AlignLeft, BookmarkPlus } from 'lucide-react';
 
+type GeneratorMode = 'comment' | 'reply' | 'message';
+
+interface CommentResults {
+  short?: string[];
+  medium?: string[];
+  strong?: string[];
+}
+
+type SingleResultMap = Record<string, string>;
+
 export const Generator: React.FC = () => {
-  const [mode, setMode] = useState<'comment' | 'reply' | 'message'>('comment');
+  const [mode, setMode] = useState<GeneratorMode>('comment');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [results, setResults] = useState<any>(null);
+  const [results, setResults] = useState<CommentResults | SingleResultMap | null>(null);
   const [copiedIndex, setCopiedIndex] = useState<string | null>(null);
   const [savedDraftIndex, setSavedDraftIndex] = useState<string | null>(null);
 
@@ -70,6 +80,10 @@ export const Generator: React.FC = () => {
           tabs[0].id,
           { action: 'GET_PAGE_CONTEXT' },
           (response) => {
+            if (chrome.runtime.lastError) {
+              return;
+            }
+
             if (!cancelled && response?.success && response.data) {
               setContextText(response.data.content || '');
             }
@@ -119,15 +133,7 @@ export const Generator: React.FC = () => {
       }
 
       const responseText = await generateCompletion(systemPrompt, userPrompt);
-
-      try {
-        const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-        const jsonStr = jsonMatch ? jsonMatch[0] : responseText;
-        const parsed = JSON.parse(jsonStr);
-        setResults(parsed);
-      } catch (e) {
-        setError("Failed to parse AI response. It might not be in the expected format.");
-      }
+      setResults(parseGeneratedResults(mode, responseText));
 
     } catch (err: any) {
       setError(err.message || "An error occurred during generation.");
@@ -151,13 +157,15 @@ export const Generator: React.FC = () => {
 
   const renderCommentResults = () => {
     if (!results) return null;
+    const commentResults = results as CommentResults;
     return (
       <div className="space-y-4 mt-4">
         {['short', 'medium', 'strong'].map((category) => (
-          results[category] && Array.isArray(results[category]) ? (
+          commentResults[category as keyof CommentResults] &&
+          Array.isArray(commentResults[category as keyof CommentResults]) ? (
             <div key={category} className="space-y-2">
               <h4 className="text-xs font-semibold uppercase text-gray-500">{category} Comments</h4>
-              {results[category].map((comment: string, i: number) => (
+              {(commentResults[category as keyof CommentResults] || []).map((comment: string, i: number) => (
                 <div key={`${category}-${i}`} className="bg-white p-3 rounded border text-sm group relative">
                   <p className="pr-16 text-gray-800">{comment}</p>
                   <div className="absolute top-2 right-2 flex gap-1">
@@ -187,9 +195,10 @@ export const Generator: React.FC = () => {
 
   const renderSingleResults = () => {
     if (!results) return null;
+    const singleResults = results as SingleResultMap;
     return (
       <div className="space-y-3 mt-4">
-        {Object.entries(results).map(([key, value]) => (
+        {Object.entries(singleResults).map(([key, value]) => (
           typeof value === 'string' && (
             <div key={key} className="bg-white p-3 rounded border text-sm group relative">
               <h4 className="text-xs font-semibold uppercase text-gray-500 mb-1">{key.replace('_', ' ')}</h4>
@@ -387,3 +396,31 @@ export const Generator: React.FC = () => {
     </div>
   );
 };
+
+function parseGeneratedResults(mode: GeneratorMode, responseText: string): CommentResults | SingleResultMap {
+  const cleaned = responseText
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/, '')
+    .trim();
+
+  const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+  if (jsonMatch) {
+    try {
+      return JSON.parse(jsonMatch[0]);
+    } catch {
+      // Fall back to plain-text shaping below.
+    }
+  }
+
+  if (mode === 'comment') {
+    return {
+      short: [cleaned],
+      medium: [],
+      strong: []
+    };
+  }
+
+  return {
+    generated: cleaned
+  };
+}

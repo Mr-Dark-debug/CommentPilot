@@ -1,5 +1,7 @@
+import { DEFAULT_MODEL_BY_PROVIDER, type ProviderId, isValidModelForProvider } from './models';
+
 export interface AppSettings {
-  provider: 'groq' | 'openrouter';
+  provider: ProviderId;
   model: string;
   groqApiKey: string;
   openrouterApiKey: string;
@@ -28,11 +30,16 @@ export const getSettings = async (): Promise<AppSettings> => {
     chrome.storage.local.get(
       ['provider', 'model', 'groqApiKey', 'openrouterApiKey'],
       (result) => {
+        const provider: ProviderId = result.provider === 'openrouter' ? 'openrouter' : 'groq';
+        const fallbackModel = DEFAULT_MODEL_BY_PROVIDER[provider];
+        const storedModel = typeof result.model === 'string' ? result.model : undefined;
+        const model = isValidModelForProvider(provider, storedModel) ? storedModel : fallbackModel;
+
         resolve({
-          provider: result.provider || 'groq',
-          model: result.model || 'llama3-8b-8192',
-          groqApiKey: result.groqApiKey || '',
-          openrouterApiKey: result.openrouterApiKey || '',
+          provider,
+          model,
+          groqApiKey: typeof result.groqApiKey === 'string' ? result.groqApiKey : '',
+          openrouterApiKey: typeof result.openrouterApiKey === 'string' ? result.openrouterApiKey : '',
         });
       }
     );
@@ -50,7 +57,7 @@ export const saveSettings = async (settings: Partial<AppSettings>): Promise<void
 export const getHistory = async (): Promise<HistoryItem[]> => {
   return new Promise((resolve) => {
     chrome.storage.local.get(['history'], (result) => {
-      resolve(result.history || []);
+      resolve(Array.isArray(result.history) ? (result.history as HistoryItem[]) : []);
     });
   });
 };
@@ -95,7 +102,8 @@ export const clearAllData = async (): Promise<void> => {
 export const getPendingComposeContext = async (): Promise<PendingComposeContext | null> => {
   return new Promise((resolve) => {
     chrome.storage.local.get(['pendingComposeContext'], (result) => {
-      resolve(result.pendingComposeContext || null);
+      const pendingContext = result.pendingComposeContext;
+      resolve(isPendingComposeContext(pendingContext) ? pendingContext : null);
     });
   });
 };
@@ -115,3 +123,18 @@ export const clearPendingComposeContext = async (): Promise<void> => {
     });
   });
 };
+
+function isPendingComposeContext(value: unknown): value is PendingComposeContext {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const candidate = value as Partial<PendingComposeContext>;
+  return (
+    (candidate.mode === 'comment' || candidate.mode === 'reply' || candidate.mode === 'message') &&
+    typeof candidate.contextText === 'string' &&
+    typeof candidate.url === 'string' &&
+    candidate.source === 'linkedin-inline' &&
+    typeof candidate.timestamp === 'number'
+  );
+}

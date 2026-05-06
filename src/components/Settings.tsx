@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { getSettings, saveSettings, AppSettings, clearAllData, clearHistory } from '../lib/storage';
-import { PROVIDER_MODELS } from '../lib/ai';
+import { DEFAULT_MODEL_BY_PROVIDER, PROVIDER_MODELS, type ProviderId } from '../lib/models';
 
 export const Settings: React.FC = () => {
   const [settings, setLocalSettings] = useState<AppSettings | null>(null);
@@ -16,6 +16,22 @@ export const Settings: React.FC = () => {
     saveSettings({ [key]: value });
   };
 
+  const handleProviderChange = async (provider: ProviderId) => {
+    if (!settings) {
+      return;
+    }
+
+    const nextModel = DEFAULT_MODEL_BY_PROVIDER[provider];
+    const nextSettings: AppSettings = {
+      ...settings,
+      provider,
+      model: nextModel
+    };
+
+    setLocalSettings(nextSettings);
+    await saveSettings({ provider, model: nextModel });
+  };
+
   if (!settings) return <div className="p-4">Loading settings...</div>;
 
   return (
@@ -26,7 +42,7 @@ export const Settings: React.FC = () => {
         <label className="block text-sm font-medium text-gray-700 mb-1">AI Provider</label>
         <select
           value={settings.provider}
-          onChange={(e) => handleChange('provider', e.target.value as 'groq' | 'openrouter')}
+          onChange={(e) => handleProviderChange(e.target.value as ProviderId)}
           className="w-full border border-gray-300 rounded p-2 text-sm focus:ring-blue-500 focus:border-blue-500"
         >
           <option value="groq">Groq</option>
